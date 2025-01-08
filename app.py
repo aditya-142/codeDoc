@@ -3,27 +3,23 @@ import os
 import ast
 import logging
 import tempfile
+import shutil
 from git import Repo
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from dataclasses import dataclass
 from urllib.parse import urlparse
 from prompts import GRADING_PROMPT
 from agent import return_agent
 
 MAX_DIRECTORY_DEPTH = 5
-API_KEY = st.secrets.get('AZURE_OPENAI_API_KEY')
-ENDPOINT = st.secrets.get('AZURE_OPENAI_API_ENDPOINT')
-DEPLOYMENT_NAME = st.secrets.get('AZURE_OPENAI_DEPLOYMENT_NAME')
+API_KEY = st.secrets['AZURE_OPENAI_API_KEY']
+ENDPOINT = st.secrets['AZURE_OPENAI_API_ENDPOINT']
+DEPLOYMENT_NAME = st.secrets['AZURE_OPENAI_DEPLOYMENT_NAME']
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Validate secrets
-if not API_KEY or not ENDPOINT or not DEPLOYMENT_NAME:
-    st.error("Azure OpenAI API configuration is incomplete. Please check your Streamlit secrets.")
-    st.stop()
 
 # Set page config
 st.set_page_config(page_title="Code Product Documentation", layout="wide")
@@ -58,7 +54,7 @@ def clone_github_repo(url: str) -> Tuple[str, tempfile.TemporaryDirectory]:
         logger.error(f"Error cloning repository: {str(e)}")
         raise Exception(f"Failed to clone repository: {str(e)}")
 
-@st.cache_data(ttl=3600)
+@st.cache_data
 def get_python_files(directory: str, max_depth: int = MAX_DIRECTORY_DEPTH) -> List[str]:
     """Yield paths of Python files in the given directory and its subdirectories up to max_depth."""
     python_files = []
@@ -69,7 +65,7 @@ def get_python_files(directory: str, max_depth: int = MAX_DIRECTORY_DEPTH) -> Li
                     python_files.append(os.path.join(root, file))
     return python_files
 
-@st.cache_data(ttl=3600)
+@st.cache_data
 def extract_info(file_path: str) -> Optional[FileInfo]:
     """Extract relevant information from a Python file."""
     try:
@@ -101,7 +97,7 @@ def generate_file_summary(file_info: FileInfo) -> str:
         Classes: {file_info.classes}
     """
 
-@st.cache_data(ttl=3600)
+@st.cache_data
 def generate_holistic_documentation(project_info: List[FileInfo], template: str) -> Optional[str]:
     """Generate comprehensive documentation for the project using the provided template."""
     file_summaries = "\n".join(generate_file_summary(file_info) for file_info in project_info)
@@ -134,15 +130,11 @@ def generate_holistic_documentation(project_info: List[FileInfo], template: str)
             ]
         )
         return response['choices'][0]['message']['content'].strip()
-    except openai.error.AuthenticationError:
-        st.error("Invalid Azure OpenAI API Key. Please check your configuration.")
-    except openai.error.APIConnectionError:
-        st.error("Failed to connect to Azure OpenAI. Please check your network and API endpoint.")
     except Exception as e:
         logger.error(f"Error generating holistic documentation: {str(e)}")
-    return None
+        return None
 
-@st.cache_data(ttl=3600)
+@st.cache_data
 def evaluate_documentation(original_doc: str, generated_doc: str) -> Optional[str]:
     """Evaluate the generated documentation against the original."""
     evaluate_prompt = GRADING_PROMPT.replace("{original}", original_doc)
@@ -169,6 +161,7 @@ def process_input_path(input_path: str) -> Tuple[str, Optional[tempfile.Temporar
     
     return directory_path, temp_dir
 
+# Main app logic
 def main():
     input_path = st.text_input(
         "Enter the directory path or GitHub repository URL:",
@@ -176,18 +169,12 @@ def main():
         key="input_path"
     )
 
-    template_choice = st.selectbox(
-        "Choose a documentation template:",
-        ["Default", "Detailed API Reference", "Minimal Project Overview"]
+    # Add a text area for the user to input the template
+    template = st.text_area(
+        "Enter the documentation template structure (leave empty for default):",
+        value="# Project Overview\n## Installation\n## Usage\n## API Reference\n## Contributing",
+        help="Enter the desired structure for your documentation. Use Markdown formatting."
     )
-
-    template = ""
-    if template_choice == "Default":
-        template = "# Project Overview\n## Installation\n## Usage\n## API Reference\n## Contributing"
-    elif template_choice == "Detailed API Reference":
-        template = "# Project Overview\n## Installation\n## Usage\n## API Documentation\n### Classes\n### Functions\n## Contributing"
-    else:
-        template = "# Project Overview\n## Installation\n"
 
     if input_path and st.button("Generate Documentation", key="generate_button"):
         with st.spinner("Processing input..."):
@@ -196,20 +183,19 @@ def main():
             if directory_path:
                 try:
                     file_paths = get_python_files(directory_path)
-                    progress_bar = st.progress(0)
-
+                    
                     project_info = []
-                    for idx, file_path in enumerate(file_paths):
+                    for file_path in file_paths:
                         file_info = extract_info(file_path)
                         if file_info:
                             project_info.append(file_info)
                         else:
                             logger.warning(f"Failed to extract information from {file_path}")
-                        progress_bar.progress((idx + 1) / len(file_paths))
 
                     documentation = generate_holistic_documentation(project_info, template)
                     st.session_state.documentation = documentation
                 finally:
+                    # Clean up temporary directory if it exists
                     if temp_dir:
                         temp_dir.cleanup()
 
@@ -222,7 +208,7 @@ def main():
 
     if st.session_state.get('show_evaluation', False):
         st.markdown("## Evaluation")
-
+        
         eval_choice = st.selectbox("Choose original document source:", ["Upload", "Paste", "Attach"])
 
         original_document = None
@@ -249,10 +235,6 @@ def main():
 
                 st.markdown("## Evaluation Report")
                 st.markdown(eval_report)
-
-                with open("evaluation_report.md", "w") as f:
-                    f.write(eval_report)
-                st.success("Evaluation report saved as evaluation_report.md.")
 
 if __name__ == "__main__":
     main()
